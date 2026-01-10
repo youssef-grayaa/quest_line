@@ -4,13 +4,54 @@
     "Name": "Sample Project",
     "Quests": [
       {
-        "ID": "1768061494495847400",
-        "Title": "hi",
-        "Description": "hihi",
+        "ID": "1768062015664321004",
+        "Title": "Rust Forensics Tool",
+        "Description": "create a rust forensics tool for windows using tauri",
+        "Tasks": [
+          {
+            "ID": "1768062047156813260",
+            "Description": "learn rust",
+            "Done": false
+          },
+          {
+            "ID": "1768062068004554413",
+            "Description": "set project scope and functionalities",
+            "Done": false
+          }
+        ],
+        "Progress": 0,
+        "Priority": 6,
+        "Deadline": null,
+        "State": 0
+      },
+      {
+        "ID": "1768062229106142569",
+        "Title": "codeQL LLM api",
+        "Description": "create an api using codeQL to scan LLM code for vulnerabilties",
         "Tasks": null,
         "Progress": 0,
-        "Priority": 3,
-        "Deadline": "2026-10-20T00:00:00Z",
+        "Priority": 5,
+        "Deadline": null,
+        "State": 0
+      },
+      {
+        "ID": "1768062278038771604",
+        "Title": "Reverse Engineering Pipleline",
+        "Description": "improve reverse engineering pipeline using AI.",
+        "Tasks": null,
+        "Progress": 0,
+        "Priority": 4,
+        "Deadline": null,
+        "State": 0
+      },
+      {
+        "ID": "1768062402804355247",
+        "Title": "well being mobile app",
+        "Description": "create a mobile app for wellbeing. sending notifications throughout the day (screentime breaks etc)",
+        "Tasks": null,
+        "Progress": 0,
+        "Priority": 4,
+        "Deadline": null,
         "State": 0
       }
     ],
