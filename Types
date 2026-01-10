@@ -1,0 +1,17 @@
+type Quest struct {
+    ID        string
+    Title     string
+    Description string
+    Tasks     []Task
+    Progress  float64 // 0.0 → 100.0
+
+    Priority  int
+    Deadline  *time.Time
+    State     QuestState
+}
+
+type Task struct {
+    ID          string
+    Description string
+    Done        bool
+}

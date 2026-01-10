@@ -1,0 +1,815 @@
+package tui
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/list"
+	"quest_line/domain"
+)
+
+// View represents the current screen
+type View int
+
+const (
+	ViewDashboard View = iota
+	ViewProjectList
+	ViewQuestList
+	ViewQuestDetail
+	ViewCreateProject
+	ViewEditProject
+	ViewCreateQuest
+	ViewEditQuest
+	ViewCreateTask
+	ViewEditTask
+)
+
+// ProjectItem represents a project in the list
+type ProjectItem struct {
+	project *domain.Project
+}
+
+// FilterValue returns the value to filter by
+func (p ProjectItem) FilterValue() string {
+	return p.project.Name
+}
+
+// Title returns the title
+func (p ProjectItem) Title() string {
+	return p.project.Name
+}
+
+// Description returns the description
+func (p ProjectItem) Description() string {
+	return fmt.Sprintf("%.1f%% complete - %d quests", p.project.Progress, len(p.project.Quests))
+}
+
+// QuestItem represents a quest in the list
+type QuestItem struct {
+	quest *domain.Quest
+}
+
+// FilterValue returns the value to filter by
+func (q QuestItem) FilterValue() string {
+	return q.quest.Title
+}
+
+// Title returns the title
+func (q QuestItem) Title() string {
+	return q.quest.Title
+}
+
+// Description returns the description
+func (q QuestItem) Description() string {
+	return fmt.Sprintf("%.1f%% complete - %d tasks", q.quest.Progress, len(q.quest.Tasks))
+}
+
+// TaskItem represents a task in the list
+type TaskItem struct {
+	task *domain.Task
+}
+
+// FilterValue returns the value to filter by
+func (t TaskItem) FilterValue() string {
+	return t.task.Description
+}
+
+// Title returns the title
+func (t TaskItem) Title() string {
+	status := "[ ]"
+	if t.task.Done {
+		status = "[✓]"
+	}
+	return fmt.Sprintf("%s %s", status, t.task.Description)
+}
+
+// Description returns the description
+func (t TaskItem) Description() string {
+	return ""
+}
+
+// RootModel is the main application model
+type RootModel struct {
+	// Navigation
+	currentView View
+	keymap      KeyMap
+	help        HelpModel
+
+	// Data
+	projects []domain.Project
+
+	// Screen models
+	projectList list.Model
+	questList   list.Model
+	taskList    list.Model
+	form        FormModel
+	inForm      bool
+
+	// Navigation context
+	selectedProject *domain.Project
+	selectedQuest   *domain.Quest
+	editingIdx      int // for edit operations
+
+	// Delete confirmation
+	pendingDelete bool
+	deleteType    string // "project", "quest", "task"
+	deleteIndices [3]int // projectIdx, questIdx, taskIdx
+}
+
+// InitialModel creates the initial root model
+func InitialModel() RootModel {
+	projects, _ := domain.LoadProjects()
+
+	// If no projects loaded, add a sample project
+	if len(projects) == 0 {
+		sampleQuest := domain.Quest{
+			ID:          "sample-quest",
+			Title:       "Sample Quest",
+			Description: "This is a sample quest to get you started",
+			Tasks: []domain.Task{
+				{ID: "task1", Description: "Complete first task", Done: false},
+				{ID: "task2", Description: "Complete second task", Done: true},
+			},
+			Priority: 5,
+			State:    domain.StateActive,
+		}
+		sampleQuest.CalculateProgress()
+		sampleProject := domain.Project{
+			ID:     "sample-project",
+			Name:   "Sample Project",
+			Quests: []domain.Quest{sampleQuest},
+		}
+		sampleProject.CalculateProgress()
+		projects = []domain.Project{sampleProject}
+	}
+
+	// Calculate progress for all quests and projects (in case loaded from JSON without progress)
+	for i := range projects {
+		for j := range projects[i].Quests {
+			projects[i].Quests[j].CalculateProgress()
+		}
+		projects[i].CalculateProgress()
+	}
+
+	// Create list items
+	var items []list.Item
+	for i := range projects {
+		items = append(items, ProjectItem{project: &projects[i]})
+	}
+
+	// Create the project list
+	projectList := list.New(items, list.NewDefaultDelegate(), 0, 0)
+	projectList.Title = "Projects"
+	projectList.Styles.Title = titleStyle
+
+	// Create the quest list (initially empty)
+	questList := list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0)
+	questList.Title = "Quests"
+	questList.Styles.Title = titleStyle
+
+	// Create the task list (initially empty)
+	taskList := list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0)
+	taskList.Title = "Tasks"
+	taskList.Styles.Title = titleStyle
+
+	keymap := DefaultKeyMap()
+	help := NewHelpModel()
+
+	return RootModel{
+		currentView:  ViewDashboard,
+		keymap:       keymap,
+		help:         help,
+		projects:     projects,
+		projectList:  projectList,
+		questList:    questList,
+		taskList:     taskList,
+		inForm:       false,
+		selectedProject: nil,
+		selectedQuest:   nil,
+		editingIdx:   -1,
+		pendingDelete: false,
+	}
+}
+
+// Init initializes the model
+func (m RootModel) Init() tea.Cmd {
+	return nil
+}
+
+// Update processes messages
+func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		if m.currentView == ViewDashboard || m.currentView == ViewProjectList {
+			m.projectList.SetSize(msg.Width, msg.Height)
+		}
+		if m.currentView == ViewQuestList {
+			m.questList.SetSize(msg.Width, msg.Height)
+		}
+		if m.currentView == ViewQuestDetail {
+			m.taskList.SetSize(msg.Width, msg.Height)
+		}
+	case tea.KeyMsg:
+		if m.inForm {
+			return m.handleFormInput(msg)
+		}
+		if m.pendingDelete {
+			return m.handleDeleteConfirmation(msg)
+		}
+		if key.Matches(msg, m.keymap.Quit) {
+			m.saveProjects()
+			return m, tea.Quit
+		}
+		if key.Matches(msg, m.keymap.Help) {
+			m.help.ToggleHelp()
+			return m, nil
+		}
+		if m.currentView == ViewDashboard || m.currentView == ViewProjectList {
+			switch {
+			case key.Matches(msg, m.keymap.Create):
+				m.startCreateProject()
+				return m, nil
+			case key.Matches(msg, m.keymap.Delete):
+				m.startDeleteProject()
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.projectList, cmd = m.projectList.Update(msg)
+			return m, cmd
+		}
+		if m.currentView == ViewQuestList {
+			switch {
+			case msg.String() == "enter":
+				idx := m.questList.Index()
+				if m.selectedProject != nil && idx >= 0 && idx < len(m.selectedProject.Quests) {
+					m.selectedQuest = &m.selectedProject.Quests[idx]
+					m.updateTaskList()
+					m.navigateTo(ViewQuestDetail)
+				}
+				return m, nil
+			case key.Matches(msg, m.keymap.Create):
+				m.startCreateQuest()
+				return m, nil
+			case key.Matches(msg, m.keymap.Delete):
+				m.startDeleteQuest()
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.questList, cmd = m.questList.Update(msg)
+			return m, cmd
+		}
+				return m, nil
+			case key.Matches(msg, m.keymap.Create):
+				m.startCreateQuest()
+				return m, nil
+			case key.Matches(msg, m.keymap.Delete):
+				m.startDeleteQuest()
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.questList, cmd = m.questList.Update(msg)
+			return m, cmd
+		}
+		if m.currentView == ViewQuestDetail {
+			switch {
+			case key.Matches(msg, m.keymap.Toggle):
+				if item, ok := m.taskList.SelectedItem().(TaskItem); ok {
+					item.task.Done = !item.task.Done
+					m.selectedQuest.CalculateProgress()
+					for i := range m.projects {
+						if &m.projects[i] == m.selectedProject {
+							m.projects[i].CalculateProgress()
+							break
+						}
+					}
+					m.updateTaskList()
+					return m, m.saveProjectsCmd()
+				}
+			case key.Matches(msg, m.keymap.Create):
+				m.startCreateTask()
+				return m, nil
+			case key.Matches(msg, m.keymap.Delete):
+				m.startDeleteTask()
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.taskList, cmd = m.taskList.Update(msg)
+			return m, cmd
+		}
+		return m.handleNavigationInput(msg)
+	}
+	return m, nil
+}
+func (m *RootModel) handleDeleteConfirmation(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y":
+		m.confirmDelete()
+		return m, m.saveProjectsCmd()
+	case "n", "N":
+		m.pendingDelete = false
+		return m, nil
+	}
+	return m, nil
+}
+
+// handleFormInput processes input in form views
+func (m *RootModel) handleFormInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "esc" {
+		m.cancelForm()
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.form, cmd = m.form.Update(msg)
+
+	if msg.String() == "enter" {
+		if err := m.form.Validate(); err != nil {
+			// Could show error, for now just don't submit
+			return m, nil
+		}
+		m.submitForm()
+		return m, m.saveProjectsCmd()
+	}
+
+	return m, cmd
+}
+
+// handleNavigationInput processes input in navigation views
+func (m *RootModel) handleNavigationInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	// Global navigation
+	case key.Matches(msg, m.keymap.Dashboard):
+		m.navigateTo(ViewDashboard)
+		return m, nil
+
+	case key.Matches(msg, m.keymap.Projects):
+		m.navigateTo(ViewProjectList)
+		return m, nil
+
+	case key.Matches(msg, m.keymap.QuestList):
+		m.navigateTo(ViewQuestList)
+		return m, nil
+
+	// Navigation-specific input
+	default:
+		return m.handleViewSpecificInput(msg)
+	}
+}
+
+// handleViewSpecificInput processes view-specific input
+func (m *RootModel) handleViewSpecificInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	return m, nil
+}
+
+
+
+// Form lifecycle
+func (m *RootModel) startCreateProject() {
+	m.form = NewProjectForm("Create Project", "")
+	m.currentView = ViewCreateProject
+	m.inForm = true
+	m.editingIdx = -1
+}
+
+func (m *RootModel) startEditProject() {
+	if item, ok := m.projectList.SelectedItem().(ProjectItem); ok {
+		p := item.project
+		m.form = NewProjectForm("Edit Project", p.Name)
+		m.currentView = ViewEditProject
+		m.inForm = true
+		m.editingIdx = m.projectList.Index()
+	}
+}
+
+func (m *RootModel) startCreateQuest() {
+	if m.selectedProject != nil {
+		m.form = NewQuestForm("Create Quest", nil)
+		m.currentView = ViewCreateQuest
+		m.inForm = true
+		m.editingIdx = -1
+	}
+}
+
+func (m *RootModel) startEditQuest() {
+	if item, ok := m.questList.SelectedItem().(QuestItem); ok {
+		q := item.quest
+		m.form = NewQuestForm("Edit Quest", q)
+		m.currentView = ViewEditQuest
+		m.inForm = true
+		m.editingIdx = m.questList.Index()
+	}
+}
+
+func (m *RootModel) startCreateTask() {
+	if m.selectedQuest != nil {
+		m.form = NewTaskForm("Create Task", "")
+		m.currentView = ViewCreateTask
+		m.inForm = true
+		m.editingIdx = -1
+	}
+}
+
+func (m *RootModel) startEditTask() {
+	if item, ok := m.taskList.SelectedItem().(TaskItem); ok {
+		m.form = NewTaskForm("Edit Task", item.task.Description)
+		m.currentView = ViewEditTask
+		m.inForm = true
+		m.editingIdx = m.taskList.Index()
+	}
+}
+
+// Form submission and cancellation
+func (m *RootModel) submitForm() {
+	switch m.currentView {
+	case ViewCreateProject:
+		m.createProject()
+	case ViewEditProject:
+		m.updateProject()
+	case ViewCreateQuest:
+		m.createQuest()
+	case ViewEditQuest:
+		m.updateQuest()
+	case ViewCreateTask:
+		m.createTask()
+	case ViewEditTask:
+		m.updateTask()
+	}
+	m.exitForm()
+}
+
+func (m *RootModel) cancelForm() {
+	m.exitForm()
+}
+
+func (m *RootModel) exitForm() {
+	m.inForm = false
+	m.editingIdx = -1
+	switch m.currentView {
+	case ViewCreateProject, ViewEditProject:
+		m.currentView = ViewProjectList
+	case ViewCreateQuest, ViewEditQuest:
+		m.currentView = ViewQuestList
+	case ViewCreateTask, ViewEditTask:
+		m.currentView = ViewQuestDetail
+	}
+}
+
+// CRUD Operations
+func (m *RootModel) createProject() {
+	values := m.form.GetValues()
+	name := strings.TrimSpace(values["Name:"])
+	if name != "" {
+		domain.CreateProject(&m.projects, name)
+		m.refreshAllModels()
+	}
+}
+
+func (m *RootModel) updateProject() {
+	values := m.form.GetValues()
+	name := strings.TrimSpace(values["Name:"])
+	if name != "" && m.editingIdx >= 0 {
+		domain.UpdateProject(&m.projects, m.editingIdx, name)
+		m.selectedProject = &m.projects[m.editingIdx]
+		m.refreshAllModels()
+	}
+}
+
+func (m *RootModel) startDeleteProject() {
+	idx := m.projectList.Index()
+	if idx >= 0 && idx < len(m.projects) {
+		m.pendingDelete = true
+		m.deleteType = "project"
+		m.deleteIndices = [3]int{idx, -1, -1}
+	}
+}
+
+// confirmDelete performs the actual deletion
+func (m *RootModel) confirmDelete() {
+	switch m.deleteType {
+	case "project":
+		idx := m.deleteIndices[0]
+		if idx >= 0 && idx < len(m.projects) {
+			domain.DeleteProject(&m.projects, idx)
+			m.selectedProject = nil
+			if idx >= len(m.projects) && idx > 0 {
+				idx--
+			}
+			m.projectList.Select(idx)
+			m.refreshAllModels()
+		}
+	case "quest":
+		if m.selectedProject != nil {
+			idx := m.deleteIndices[1]
+			if idx >= 0 && idx < len(m.selectedProject.Quests) {
+				domain.DeleteQuest(&m.projects, m.findProjectIndex(m.selectedProject), idx)
+				if m.questList.Index() >= len(m.selectedProject.Quests) && m.questList.Index() > 0 {
+					m.questList.Select(m.questList.Index() - 1)
+				}
+				m.refreshAllModels()
+			}
+		}
+	case "task":
+		if m.selectedQuest != nil {
+			idx := m.deleteIndices[2]
+			if idx >= 0 && idx < len(m.selectedQuest.Tasks) {
+				domain.DeleteTask(&m.projects, m.findProjectIndex(m.selectedProject), m.findQuestIndex(m.selectedQuest), idx)
+				if m.taskList.Index() >= len(m.selectedQuest.Tasks) && m.taskList.Index() > 0 {
+					m.taskList.Select(m.taskList.Index() - 1)
+				}
+				m.refreshAllModels()
+			}
+		}
+	}
+	m.pendingDelete = false
+}
+
+func (m *RootModel) createQuest() {
+	if m.selectedProject == nil {
+		return
+	}
+	values := m.form.GetValues()
+	title := strings.TrimSpace(values["Title:"])
+	if title == "" {
+		return
+	}
+
+	desc := strings.TrimSpace(values["Description:"])
+	priorityStr := strings.TrimSpace(values["Priority (0-10):"])
+	priority := 0
+	if p, err := strconv.Atoi(priorityStr); err == nil {
+		priority = p
+	}
+
+	var deadline *time.Time
+	deadlineStr := strings.TrimSpace(values["Deadline (YYYY-MM-DD):"])
+	if deadlineStr != "" {
+		if d, err := time.Parse("2006-01-02", deadlineStr); err == nil {
+			deadline = &d
+		}
+	}
+
+	projIdx := m.findProjectIndex(m.selectedProject)
+	if projIdx >= 0 {
+		domain.CreateQuest(&m.projects, projIdx, title, desc, priority, deadline)
+		m.selectedProject = &m.projects[projIdx]
+		m.refreshAllModels()
+	}
+}
+
+func (m *RootModel) updateQuest() {
+	if m.selectedProject == nil || m.editingIdx < 0 {
+		return
+	}
+	values := m.form.GetValues()
+	title := strings.TrimSpace(values["Title:"])
+	if title == "" {
+		return
+	}
+
+	desc := strings.TrimSpace(values["Description:"])
+	priorityStr := strings.TrimSpace(values["Priority (0-10):"])
+	priority := 0
+	if p, err := strconv.Atoi(priorityStr); err == nil {
+		priority = p
+	}
+
+	var deadline *time.Time
+	deadlineStr := strings.TrimSpace(values["Deadline (YYYY-MM-DD):"])
+	if deadlineStr != "" {
+		if d, err := time.Parse("2006-01-02", deadlineStr); err == nil {
+			deadline = &d
+		}
+	}
+
+	projIdx := m.findProjectIndex(m.selectedProject)
+	if projIdx >= 0 {
+		domain.UpdateQuest(&m.projects, projIdx, m.editingIdx, title, desc, priority, deadline)
+		m.selectedProject = &m.projects[projIdx]
+		if m.editingIdx < len(m.selectedProject.Quests) {
+			m.selectedQuest = &m.selectedProject.Quests[m.editingIdx]
+		}
+		m.refreshAllModels()
+	}
+}
+
+func (m *RootModel) startDeleteQuest() {
+	if m.selectedProject == nil {
+		return
+	}
+	questIdx := m.questList.Index()
+	if questIdx >= 0 && questIdx < len(m.selectedProject.Quests) {
+		m.pendingDelete = true
+		m.deleteType = "quest"
+		m.deleteIndices = [3]int{m.findProjectIndex(m.selectedProject), questIdx, -1}
+	}
+}
+
+func (m *RootModel) createTask() {
+	if m.selectedQuest == nil || m.selectedProject == nil {
+		return
+	}
+	values := m.form.GetValues()
+	desc := strings.TrimSpace(values["Description:"])
+	if desc == "" {
+		return
+	}
+
+	projIdx := m.findProjectIndex(m.selectedProject)
+	questIdx := m.findQuestIndex(m.selectedQuest)
+	if projIdx >= 0 && questIdx >= 0 {
+		domain.CreateTask(&m.projects, projIdx, questIdx, desc)
+		m.selectedProject = &m.projects[projIdx]
+		m.selectedQuest = &m.selectedProject.Quests[questIdx]
+		m.refreshAllModels()
+	}
+}
+
+func (m *RootModel) updateTask() {
+	if m.selectedQuest == nil || m.selectedProject == nil || m.editingIdx < 0 {
+		return
+	}
+	values := m.form.GetValues()
+	desc := strings.TrimSpace(values["Description:"])
+	if desc == "" {
+		return
+	}
+
+	projIdx := m.findProjectIndex(m.selectedProject)
+	questIdx := m.findQuestIndex(m.selectedQuest)
+	if projIdx >= 0 && questIdx >= 0 {
+		domain.UpdateTask(&m.projects, projIdx, questIdx, m.editingIdx, desc)
+		m.selectedProject = &m.projects[projIdx]
+		m.selectedQuest = &m.selectedProject.Quests[questIdx]
+		m.refreshAllModels()
+	}
+}
+
+func (m *RootModel) startDeleteTask() {
+	idx := m.taskList.Index()
+	if idx >= 0 && m.selectedQuest != nil && idx < len(m.selectedQuest.Tasks) {
+		m.pendingDelete = true
+		m.deleteType = "task"
+		m.deleteIndices = [3]int{m.findProjectIndex(m.selectedProject), m.findQuestIndex(m.selectedQuest), idx}
+	}
+}
+
+func (m *RootModel) toggleTask() {
+	if m.selectedQuest == nil || m.selectedProject == nil {
+		return
+	}
+	taskIdx := m.taskList.Index()
+	if taskIdx >= 0 && taskIdx < len(m.selectedQuest.Tasks) {
+		m.selectedQuest.Tasks[taskIdx].Done = !m.selectedQuest.Tasks[taskIdx].Done
+		m.selectedQuest.CalculateProgress()
+		m.refreshAllModels()
+	}
+}
+
+// Utility methods
+func (m *RootModel) navigateTo(view View) {
+	m.currentView = view
+	if view == ViewQuestList {
+		m.updateQuestList()
+	}
+	if view == ViewQuestDetail {
+		m.updateTaskList()
+	}
+	m.refreshScreenModels()
+}
+
+func (m *RootModel) updateTaskList() {
+	if m.selectedQuest == nil {
+		m.taskList.SetItems([]list.Item{})
+		return
+	}
+	var items []list.Item
+	for i := range m.selectedQuest.Tasks {
+		items = append(items, TaskItem{task: &m.selectedQuest.Tasks[i]})
+	}
+	m.taskList.SetItems(items)
+	m.taskList.Title = fmt.Sprintf("%s (%.1f%%)", m.selectedQuest.Title, m.selectedQuest.Progress)
+}
+
+func (m *RootModel) updateQuestList() {
+	if m.selectedProject == nil {
+		m.questList.SetItems([]list.Item{})
+		return
+	}
+	var items []list.Item
+	for i := range m.selectedProject.Quests {
+		items = append(items, QuestItem{quest: &m.selectedProject.Quests[i]})
+	}
+	m.questList.SetItems(items)
+	m.questList.Title = fmt.Sprintf("Quests in %s", m.selectedProject.Name)
+}
+
+func (m *RootModel) refreshAllModels() {
+	// Update list items
+	var items []list.Item
+	for i := range m.projects {
+		items = append(items, ProjectItem{project: &m.projects[i]})
+	}
+	m.projectList.SetItems(items)
+
+	m.updateQuestList()
+	if m.selectedProject != nil && m.selectedQuest != nil {
+		projIdx := m.findProjectIndex(m.selectedProject)
+		if projIdx >= 0 {
+			m.selectedProject = &m.projects[projIdx]
+			questIdx := m.findQuestIndex(m.selectedQuest)
+			if questIdx >= 0 {
+				m.selectedQuest = &m.selectedProject.Quests[questIdx]
+			}
+		}
+	}
+	m.updateTaskList()
+}
+
+func (m *RootModel) refreshScreenModels() {
+	m.refreshAllModels()
+}
+
+func (m *RootModel) findProjectIndex(p *domain.Project) int {
+	if p == nil {
+		return -1
+	}
+	for i := range m.projects {
+		if m.projects[i].ID == p.ID {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m *RootModel) findQuestIndex(q *domain.Quest) int {
+	if m.selectedProject == nil || q == nil {
+		return -1
+	}
+	for i := range m.selectedProject.Quests {
+		if m.selectedProject.Quests[i].ID == q.ID {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m *RootModel) saveProjectsCmd() tea.Cmd {
+	return func() tea.Msg {
+		err := domain.SaveProjects(m.projects)
+		return SaveCompleteMsg{Err: err}
+	}
+}
+
+func (m *RootModel) saveProjects() {
+	_ = domain.SaveProjects(m.projects)
+}
+
+// View renders the appropriate screen
+func (m *RootModel) View() string {
+	if m.pendingDelete {
+		return m.viewDeleteConfirmation()
+	}
+
+	var content string
+	switch m.currentView {
+	case ViewDashboard:
+		content = m.projectList.View()
+	case ViewProjectList:
+		content = m.projectList.View()
+	case ViewQuestList:
+		content = m.questList.View()
+	case ViewQuestDetail:
+		content = m.taskList.View()
+	case ViewCreateProject, ViewEditProject, ViewCreateQuest, ViewEditQuest, ViewCreateTask, ViewEditTask:
+		content = m.form.View()
+	default:
+		content = "Unknown view"
+	}
+
+	return content + "\n\n" + m.help.ViewFor(m.currentView)
+}
+
+// viewDeleteConfirmation shows the delete confirmation prompt
+func (m *RootModel) viewDeleteConfirmation() string {
+	var itemName string
+	switch m.deleteType {
+	case "project":
+		if m.deleteIndices[0] >= 0 && m.deleteIndices[0] < len(m.projects) {
+			itemName = m.projects[m.deleteIndices[0]].Name
+		}
+	case "quest":
+		if m.selectedProject != nil && m.deleteIndices[1] >= 0 && m.deleteIndices[1] < len(m.selectedProject.Quests) {
+			itemName = m.selectedProject.Quests[m.deleteIndices[1]].Title
+		}
+	case "task":
+		if m.selectedQuest != nil && m.deleteIndices[2] >= 0 && m.deleteIndices[2] < len(m.selectedQuest.Tasks) {
+			itemName = m.selectedQuest.Tasks[m.deleteIndices[2]].Description
+		}
+	}
+
+	return fmt.Sprintf("Delete %s '%s'? (y/n)", m.deleteType, itemName)
+}
