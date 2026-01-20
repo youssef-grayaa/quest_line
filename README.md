@@ -14,6 +14,7 @@ go build -o quest_line .
 ```
 
 ## Usage
+<img width="1384" height="738" alt="1" src="https://github.com/user-attachments/assets/f88f2bb9-81a1-47e7-9c0a-aad0da442135" />
 
 ### Navigation
 - `d` - Dashboard (active quests overview)
@@ -36,11 +37,13 @@ go build -o quest_line .
 - `e` - Edit task
 - `x` - Delete task
 - `d` - Back to dashboard
+<img width="1381" height="736" alt="2" src="https://github.com/user-attachments/assets/522c7218-0695-4b09-8745-946336a4c23d" />
 
 ### Forms
 - `Tab` - Next field
 - `Enter` - Submit (advances through fields)
 - `Esc` - Cancel
+<img width="1381" height="739" alt="3" src="https://github.com/user-attachments/assets/fe991363-8999-4d3e-b4c1-7a2c3133f859" />
 
 ## Features
 
